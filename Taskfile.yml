@@ -1,0 +1,16 @@
+version: "3"
+
+silent: true
+
+dotenv: [".env"]
+
+includes:
+  cdn:
+    taskfile: ./taskfiles/cdn.yml
+    flatten: true
+
+tasks:
+  default:
+    desc: "List all tasks"
+    cmds:
+      - task --list-all
