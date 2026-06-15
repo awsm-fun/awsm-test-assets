@@ -1,0 +1,92 @@
+version: "3"
+
+# Deploy the renderer test assets to the awsm-cdn R2 bucket, served at
+# https://cdn.awsm.fun/test-assets/. Pattern mirrors
+# main-site/taskfiles/cdn.yml: rclone-sync-to-R2 + Cloudflare zone cache-purge,
+# against an R2 bucket on a custom domain (no Worker). Credentials come from the
+# repo-root `.env` (loaded by the root Taskfile's `dotenv:`), exported into each
+# task's environment — read as `$CLOUDFLARE_*` shell vars, never templated onto
+# a command line.
+#
+# WHAT gets uploaded is controlled by ./cdn-filter.txt (an rclone --filter-from
+# manifest), NOT a hand-maintained `cp` list. `sync` makes the remote mirror the
+# filtered local tree, so committing a new asset ships it and deleting one
+# removes it from the CDN.
+
+vars:
+  R2_BUCKET: "awsm-cdn"
+  CDN_HOST: "cdn.awsm.fun"
+  CDN_PREFIX: "test-assets"
+  PATH_REPO_ROOT:
+    sh: git rev-parse --show-toplevel
+  PATH_FILTER: '{{joinPath .PATH_REPO_ROOT "cdn-filter.txt"}}'
+
+tasks:
+  deploy:
+    desc: "cdn: sync the test assets to https://cdn.awsm.fun/test-assets/ (filtered by cdn-filter.txt). Run `task purge` after if you need the edge cache invalidated immediately."
+    requires:
+      vars: [CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_ACCESS_KEY_ID, CLOUDFLARE_ACCESS_KEY]
+    cmds:
+      - |
+        set -euo pipefail
+        EP="https://${CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com"
+        S3=(--s3-provider Cloudflare
+            --s3-access-key-id "$CLOUDFLARE_ACCESS_KEY_ID"
+            --s3-secret-access-key "$CLOUDFLARE_ACCESS_KEY"
+            --s3-endpoint "$EP"
+            --s3-no-check-bucket)
+        DEST=":s3:{{.R2_BUCKET}}/{{.CDN_PREFIX}}"
+
+        echo "▶ Syncing test assets → {{.R2_BUCKET}}/{{.CDN_PREFIX}}/ (filter: cdn-filter.txt) …"
+        # --checksum skips files whose content is unchanged (so the 100+ MB
+        # ktx2s aren't re-uploaded every run). Assets are fixed-name and
+        # mutable across deploys, so they're cached with a short max-age rather
+        # than `immutable`; `task purge` forces an immediate edge invalidation.
+        rclone sync "{{.PATH_REPO_ROOT}}" "$DEST" "${S3[@]}" \
+          --filter-from "{{.PATH_FILTER}}" \
+          --checksum \
+          --header-upload "Cache-Control: public, max-age=300"
+        echo "✅ Deployed: https://{{.CDN_HOST}}/{{.CDN_PREFIX}}/"
+
+  ls:
+    desc: "cdn: list the test-assets prefix in R2."
+    requires:
+      vars: [CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_ACCESS_KEY_ID, CLOUDFLARE_ACCESS_KEY]
+    cmds:
+      - |
+        set -euo pipefail
+        EP="https://${CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com"
+        rclone lsf ":s3:{{.R2_BUCKET}}/{{.CDN_PREFIX}}/" -R \
+          --s3-provider Cloudflare \
+          --s3-access-key-id "$CLOUDFLARE_ACCESS_KEY_ID" \
+          --s3-secret-access-key "$CLOUDFLARE_ACCESS_KEY" \
+          --s3-endpoint "$EP" \
+          --s3-no-check-bucket
+
+  check:
+    desc: "cdn: HEAD a known asset and show status/CORS/cache/content-type. Usage: task check [-- <path>]; default photo_studio/skybox.ktx2"
+    vars:
+      ASSET: '{{.CLI_ARGS | default "photo_studio/skybox.ktx2" | trim}}'
+    cmds:
+      - |
+        set -euo pipefail
+        URL="https://{{.CDN_HOST}}/{{.CDN_PREFIX}}/{{.ASSET}}"
+        echo "▶ HEAD $URL  (Origin: https://scene.awsm.fun)"
+        curl -sS -I -H "Origin: https://scene.awsm.fun" "$URL" \
+          | grep -iE '^(HTTP/|content-type|content-length|cache-control|access-control-allow-origin|cf-cache-status):' || true
+
+  purge:
+    desc: "cdn: purge the Cloudflare edge cache for cdn.awsm.fun (whole zone). Run after a deploy that overwrote an existing asset."
+    # Uses a DEDICATED Cache-Purge token, not an S3/deploy credential — purge
+    # needs the zone-scoped `Cache Purge` permission. See .env.example.
+    requires:
+      vars: [CLOUDFLARE_CACHE_PURGE_TOKEN, CLOUDFLARE_ZONE_ID]
+    cmds:
+      - |
+        set -euo pipefail
+        echo "▶ Purging Cloudflare cache (zone ${CLOUDFLARE_ZONE_ID:0:6}…) …"
+        curl -fsS -X POST \
+          "https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}/purge_cache" \
+          -H "Authorization: Bearer ${CLOUDFLARE_CACHE_PURGE_TOKEN}" \
+          -H "Content-Type: application/json" \
+          --data '{"purge_everything":true}' | jq '{success, errors}'

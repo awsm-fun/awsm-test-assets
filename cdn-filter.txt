@@ -1,0 +1,41 @@
+# Manifest controlling what `task deploy` uploads to cdn.awsm.fun/test-assets.
+#
+# This is an rclone filter file (passed via --filter-from). Rules are evaluated
+# top-to-bottom and the FIRST match wins:
+#   - pattern   → exclude
+#   + pattern   → include
+# The trailing `+ **` includes everything not matched by a rule above it, so by
+# default we upload the whole repo and only carve out what we don't want.
+#
+# `rclone sync` makes the remote MIRROR this filtered view: a path excluded here
+# (or deleted locally) is also removed from cdn.awsm.fun/test-assets on deploy.
+# To add a new runtime asset, just commit it — it ships automatically. To keep
+# something out of the CDN, add a `- pattern` line below.
+
+# --- Repo plumbing / tooling / secrets / OS cruft (never upload)
+- .git/**
+- .github/**
+- .gitignore
+- .gitattributes
+- .env
+- .env.example
+- README.md
+- Taskfile.yml
+- taskfiles/**
+- cdn-filter.txt
+- .DS_Store
+- **/.DS_Store
+
+# --- Large source / intermediate files not needed at runtime.
+#     Consumers fetch the *derived* assets (photo_studio/*.ktx2, gizmo/gizmo.glb,
+#     the per-scene project.json + raster assets). The raw HDRs, Blender files,
+#     and the source frame/IBL directories that those were baked from stay local.
+- *.exr
+- *.hdr
+- *.blend
+- photo_studio/skybox/**
+- photo_studio/ibl-env/**
+- photo_studio/ibl-irradiance/**
+
+# --- Everything else ships.
++ **
